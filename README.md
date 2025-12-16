@@ -2,6 +2,8 @@
 
 A privacy-focused Chrome extension that lets you chat with your browsing history using natural language. Recall websites you visited without remembering the exact URL or title.
 
+DEMO: https://www.youtube.com/watch?v=qqbKGZbqk0g
+
 ## Features
 
 **Natural Language Search**
@@ -19,11 +21,12 @@ Results are fetched directly from your local \`chrome.history\`. If it's not in 
 ## Installation
 
 1. Download or clone this repository.
-2. Run \`npm install\` to install dependencies.
-3. Run \`npm run build\` to generate the \`/dist\` folder.
-4. Open Chrome and go to \`chrome://extensions\`.
-5. Enable **Developer mode** (top right).
-6. Click **Load unpacked** and select the \`dist\` folder created in step 3.
+2. **Ensure you are in the \`history-chat\` directory.**
+3. Run \`npm install\` to install dependencies.
+4. Run \`npm run build\` to generate the \`/dist\` folder.
+5. Open Chrome and go to \`chrome://extensions\`.
+6. Enable **Developer mode** (top right).
+7. Click **Load unpacked** and select the \`dist\` folder created in step 3.
 
 ## Usage
 
@@ -61,3 +64,4 @@ You can clear your API key and chat history at any time via the Settings menu.
 1. **Intent Extraction:** Converts natural language into search keywords.
 2. **Local Retrieval:** Queries \`chrome.history\` API.
 3. **Semantic Ranking:** Uses LLM to select the most relevant link from the candidates.
+
