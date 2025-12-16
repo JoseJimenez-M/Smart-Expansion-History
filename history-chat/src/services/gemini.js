@@ -1,4 +1,4 @@
-const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+const BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
 export const checkGeminiConnection = async (apiKey) => {
   try {
@@ -11,19 +11,24 @@ export const checkGeminiConnection = async (apiKey) => {
   } catch (e) { return false; }
 };
 
-export const expandQuery = async (userQuery, apiKey) => {
+export const expandQuery = async (userQuery, apiKey, keywordCount = 20) => {
+  const count = Math.max(1, Math.min(100, parseInt(keywordCount, 10) || 20));
+
   const prompt = `
-  User Search: "${userQuery}"
-  
-  Task: Extract 5-10 specific search keywords to find this topic in browser history.
-  
-  Rules:
-  1. If the input is a question ("where is...", "cual fue..."), extract only the main subject.
-  2. If the input is in a non-English language, MUST include English translations of technical terms (e.g., "POO" -> "OOP", "Programacion" -> "Programming") and vice versa.
-  3. Include synonyms and related concepts (e.g., "Java" -> "JVM", "Spring", "OOP", "Class", "Inheritance", "Programming", "James Gosling").
-  4. Remove stop words (the, a, in, about, que, el, la, tutorial).
-  5. Output ONLY the array. No markdown. No text. Just [ ... ]
-  `;
+User Search: "${userQuery}"
+
+Task: Extract up to ${count} unique, single-word search keywords to find this topic in browser history.
+Order keywords from most directly relevant to least.
+
+Rules:
+1. If the input is a question, extract only the main subject.
+2. If the input is non-English, include English equivalents of technical terms and vice versa.
+3. Include close synonyms and related concepts; keep highest-value terms first.
+4. Remove stop words (the, a, in, about, que, el, la, tutorial).
+5. Keywords MUST be unique (case-insensitive, trim spaces). Do not repeat concepts.
+6. If fewer than ${count} unique keywords exist, return fewer. Do NOT pad.
+7. Output ONLY a raw JSON array. No markdown. No text. Just [ ... ].
+`;
 
   try {
     const response = await fetch(`${BASE_URL}?key=${apiKey}`, {
@@ -32,33 +37,63 @@ export const expandQuery = async (userQuery, apiKey) => {
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
     });
     const data = await response.json();
-    let text = data.candidates[0].content.parts[0].text;
-    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    
-    const jsonMatch = text.match(/\[.*\]/s);
-    if (jsonMatch) return JSON.parse(jsonMatch[0]);
 
-    return Array.isArray(json) ? json : [userQuery];
+    let text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+
+    const jsonMatch = text.match(/\[.*\]/s);
+    if (jsonMatch) {
+      const arr = JSON.parse(jsonMatch[0]);
+      if (Array.isArray(arr)) {
+        const uniq = Array.from(new Set(arr.map(x => String(x).trim()).filter(Boolean)));
+        if (uniq.length >= count) return uniq.slice(0, count);
+        return uniq.slice(0, count);
+
+      }
+    }
+
+    const fallback = userQuery
+      .split(/\s+/)
+      .map(w => w.trim())
+      .filter(w => w.length > 3);
+
+    const uniqFallback = Array.from(new Set(fallback));
+    if (uniqFallback.length >= count) return uniqFallback.slice(0, count);
+
+    return uniqFallback.slice(0, count);
+
   } catch (e) {
-    return userQuery.split(' ').filter(word => word.length > 3);
+    const fallback = userQuery
+      .split(/\s+/)
+      .map(w => w.trim())
+      .filter(w => w.length > 3);
+
+    const uniqFallback = Array.from(new Set(fallback));
+    if (uniqFallback.length >= count) return uniqFallback.slice(0, count);
+
+    return uniqFallback.slice(0, count);
+
   }
 };
 
 export const analyzeWithGemini = async (query, historyItems, apiKey) => {
   const prompt = `
-  Context: Browser History Search
-  User Query: "${query}"
-  
-  Candidate Pages:
-  ${JSON.stringify(historyItems.map(h => ({ title: h.title, url: h.url, time: h.lastVisitTime })))}
-  
-  Task: Identify the best matching page.
-  Rules:
-  1. Be lenient. If a page covers a concept related to the query (e.g., "Encapsulation" for query "Java"), mark it as found.
-  2. If the Title or URL contains the main keyword, prioritize it.
-  3. Return raw JSON: { "found": true, "url": "MATCHED_URL", "reason": "SHORT_EXPLANATION" }
-  4. If absolutely no relation exists, return { "found": false }.
-  `;
+Context: Browser History Search
+User Query: "${query}"
+
+Candidate Pages:
+${JSON.stringify(historyItems.map(h => ({ title: h.title, url: h.url, time: h.lastVisitTime })))}
+
+Task: Identify the best matching pages.
+
+Rules:
+1. Be lenient. If a page covers a concept related to the query, consider it relevant.
+2. If the Title or URL contains the main keyword, prioritize it.
+3. Return raw JSON only, with this exact shape:
+   { "found": true, "results": [ { "url": "MATCHED_URL", "reason": "SHORT_EXPLANATION" }, ... ] }
+4. Return up to 5 results ordered best to worst.
+5. If absolutely no relation exists, return { "found": false, "results": [] }.
+`;
 
   try {
     const response = await fetch(`${BASE_URL}?key=${apiKey}`, {
@@ -66,11 +101,18 @@ export const analyzeWithGemini = async (query, historyItems, apiKey) => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
     });
+
     const data = await response.json();
-    let text = data.candidates[0].content.parts[0].text;
+    let text = data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
     text = text.replace(/```json/g, '').replace(/```/g, '').trim();
-    return JSON.parse(text);
+
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      if (!Array.isArray(parsed.results)) parsed.results = [];
+      return parsed;
+    }
+    return { found: false, results: [] };
   } catch (e) {
-    return { found: false };
+    return { found: false, results: [] };
   }
 };

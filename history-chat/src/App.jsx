@@ -2,12 +2,21 @@ import { useState, useEffect, useRef } from 'react'
 import { searchMultipleKeywords } from './services/history'
 import { expandQuery, analyzeWithGemini } from './services/gemini'
 
+const SEARCH_MODES = {
+  superficial: { label: 'Superficial', keywordCount: 5 },
+  regular: { label: 'Regular', keywordCount: 20 },
+  exhaustive: { label: 'Exhaustive', keywordCount: 50 },
+  sheerlock: { label: 'Sheerlock', keywordCount: 100 }
+}
+
 function App() {
   const [view, setView] = useState('chat')
   const [apiKey, setApiKey] = useState('')
   const [input, setInput] = useState('')
   const [timeRange, setTimeRange] = useState('24h')
   const [retention, setRetention] = useState(86400000)
+  const [searchMode, setSearchMode] = useState('regular')
+  const [expandedMessages, setExpandedMessages] = useState({})
   const [messages, setMessages] = useState([
     { type: 'bot', text: 'Hi. I use Smart Expansion to find your lost links. You can chat with me or just search keywords.', timestamp: Date.now() }
   ])
@@ -17,19 +26,22 @@ function App() {
   useEffect(() => {
     const init = async () => {
       if (chrome?.storage?.sync) {
-        const settings = await chrome.storage.sync.get(['gemini_key', 'retention_period'])
+        const settings = await chrome.storage.sync.get(['gemini_key', 'retention_period', 'search_mode'])
         if (settings.gemini_key) setApiKey(settings.gemini_key)
-        
+
         const savedRetention = settings.retention_period || 86400000
         setRetention(savedRetention)
+
+        const savedMode = settings.search_mode || 'regular'
+        setSearchMode(savedMode in SEARCH_MODES ? savedMode : 'regular')
 
         if (chrome?.storage?.local) {
           const localData = await chrome.storage.local.get(['chat_history'])
           if (localData.chat_history && localData.chat_history.length > 0) {
             const now = Date.now()
             const filtered = localData.chat_history.filter(msg => {
-               const msgTime = msg.timestamp || now
-               return (now - msgTime) < savedRetention
+              const msgTime = msg.timestamp || now
+              return (now - msgTime) < savedRetention
             })
 
             if (filtered.length > 0) {
@@ -62,20 +74,26 @@ function App() {
   const saveSettings = () => {
     if (chrome?.storage?.sync) {
       const newRetention = parseInt(retention)
-      chrome.storage.sync.set({ 
-        gemini_key: apiKey,
-        retention_period: newRetention
-      }, () => {
-        setView('chat')
-        const now = Date.now()
-        const filteredMsgs = messages.filter(msg => {
-           const msgTime = msg.timestamp || now
-           return (now - msgTime) < newRetention
-        })
-        const finalMsgs = [...filteredMsgs, { type: 'bot', text: 'Settings saved.', timestamp: Date.now() }]
-        updateMessages(finalMsgs)
-      })
-    } else { setView('chat') }
+      chrome.storage.sync.set(
+        {
+          gemini_key: apiKey,
+          retention_period: newRetention,
+          search_mode: searchMode
+        },
+        () => {
+          setView('chat')
+          const now = Date.now()
+          const filteredMsgs = messages.filter(msg => {
+            const msgTime = msg.timestamp || now
+            return (now - msgTime) < newRetention
+          })
+          const finalMsgs = [...filteredMsgs, { type: 'bot', text: 'Settings saved.', timestamp: Date.now() }]
+          updateMessages(finalMsgs)
+        }
+      )
+    } else {
+      setView('chat')
+    }
   }
 
   const deleteSettings = () => {
@@ -98,20 +116,152 @@ function App() {
     const now = Date.now()
     switch (timeRange) {
       case '24h': return now - (24 * 60 * 60 * 1000)
-      case '7d':  return now - (7 * 24 * 60 * 60 * 1000)
+      case '7d': return now - (7 * 24 * 60 * 60 * 1000)
       case '30d': return now - (30 * 24 * 60 * 60 * 1000)
-      case '3m':  return now - (90 * 24 * 60 * 60 * 1000)
+      case '3m': return now - (90 * 24 * 60 * 60 * 1000)
       default: return now - (24 * 60 * 60 * 1000)
     }
   }
 
+  const isGoogleSearchUrl = (rawUrl) => {
+    try {
+      const u = new URL(rawUrl)
+      const host = u.hostname.toLowerCase()
+      if (!host.includes('google.')) return false
+      const path = u.pathname.toLowerCase()
+      return path === '/search' || path.startsWith('/search/') || path === '/url'
+    } catch {
+      return false
+    }
+  }
+
+  const normalizeUrl = (rawUrl) => {
+    try {
+      const u = new URL(rawUrl)
+      u.hash = ''
+      const toDelete = [
+        'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+        'gclid', 'fbclid', 'yclid', 'mc_cid', 'mc_eid', 'igshid'
+      ]
+      toDelete.forEach(k => u.searchParams.delete(k))
+      const sorted = new URLSearchParams()
+      Array.from(u.searchParams.entries())
+        .sort(([a], [b]) => a.localeCompare(b))
+        .forEach(([k, v]) => sorted.append(k, v))
+      u.search = sorted.toString() ? `?${sorted.toString()}` : ''
+      return u.toString()
+    } catch {
+      return rawUrl
+    }
+  }
+
+  const cleanAndDedupeCandidates = (items) => {
+    const map = new Map()
+    for (const it of items) {
+      if (!it?.url) continue
+      if (isGoogleSearchUrl(it.url)) continue
+      const n = normalizeUrl(it.url)
+      if (!map.has(n)) {
+        map.set(n, { ...it, url: n })
+      }
+    }
+    return Array.from(map.values())
+  }
+
+  const buildCandidatesTieredTwoPass = async (keywords, startTime, targetCount = 100) => {
+    const tierSpec = [
+      { from: 0, to: 10, maxPerKeyword: 10 },
+      { from: 10, to: 30, maxPerKeyword: 5 },
+      { from: 30, to: 100, maxPerKeyword: 2 }
+    ]
+
+    const bag = []
+    const bagNormSet = new Set()
+    const leftoversByKeyword = new Map()
+
+    const addToBag = (items) => {
+      for (const it of items) {
+        if (!it?.url) continue
+        if (isGoogleSearchUrl(it.url)) continue
+        const n = normalizeUrl(it.url)
+        if (bagNormSet.has(n)) continue
+        bagNormSet.add(n)
+        bag.push({ ...it, url: n })
+        if (bag.length >= targetCount) break
+      }
+    }
+
+    const pass1 = async () => {
+      for (const tier of tierSpec) {
+        const slice = keywords.slice(tier.from, tier.to)
+        for (const kw of slice) {
+          if (bag.length >= targetCount) return
+          const results = await searchMultipleKeywords([kw], startTime)
+          const cleaned = cleanAndDedupeCandidates(results)
+
+          const take = cleaned.slice(0, tier.maxPerKeyword)
+          const left = cleaned.slice(tier.maxPerKeyword)
+
+          addToBag(take)
+          if (left.length > 0) leftoversByKeyword.set(kw, left)
+        }
+      }
+    }
+
+    const pass2 = async () => {
+      if (bag.length >= targetCount) return
+      for (const kw of keywords) {
+        if (bag.length >= targetCount) return
+        const left = leftoversByKeyword.get(kw) || []
+        if (left.length === 0) continue
+        addToBag(left)
+      }
+    }
+
+    await pass1()
+    await pass2()
+
+    return bag.slice(0, targetCount)
+  }
+
+  const toggleExpanded = (idx) => {
+    setExpandedMessages(prev => ({ ...prev, [idx]: !prev[idx] }))
+  }
+
+  const exportCandidates = (candidates) => {
+    const sorted = [...(candidates || [])].sort((a, b) => {
+      const ta = (a.title || '').toLowerCase()
+      const tb = (b.title || '').toLowerCase()
+      if (ta !== tb) return ta.localeCompare(tb)
+      return (a.url || '').localeCompare(b.url || '')
+    })
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      count: sorted.length,
+      items: sorted.map(x => ({
+        title: x.title || '',
+        url: x.url || '',
+        lastVisitTime: x.lastVisitTime || ''
+      }))
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'historychat-results.json'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  }
+
   const handleSearch = async () => {
     if (!input.trim()) return
-    
+
     const userMsg = { type: 'user', text: input, timestamp: Date.now() }
     const historyWithUser = [...messages, userMsg]
-    updateMessages(historyWithUser) 
-    
+    updateMessages(historyWithUser)
+
     const currentQuery = input
     setInput('')
     const startTime = getStartTime()
@@ -121,42 +271,70 @@ function App() {
       updateMessages(loadingMsg)
 
       const candidates = await searchMultipleKeywords([currentQuery], startTime)
-      
-      if (candidates.length === 0) {
+      const cleaned = cleanAndDedupeCandidates(candidates)
+
+      if (cleaned.length === 0) {
         const noMatchMsg = [...historyWithUser, { type: 'bot', text: 'No local matches found. Try adding an API Key for AI smart search.', timestamp: Date.now() }]
         updateMessages(noMatchMsg)
       } else {
-        const foundMsg = [...historyWithUser, { type: 'bot', text: `Found ${candidates.length} matches locally:`, data: candidates.slice(0, 5), timestamp: Date.now() }]
+        const foundMsg = [...historyWithUser, { type: 'bot', text: `Found ${cleaned.length} matches locally:`, data: cleaned.slice(0, 5), allData: cleaned, timestamp: Date.now() }]
         updateMessages(foundMsg)
       }
       return
     }
 
-    const historyWithThinking = [...historyWithUser, { type: 'bot', text: 'Thinking...', timestamp: Date.now() }]
+    const modeInfo = SEARCH_MODES[searchMode] || SEARCH_MODES.regular
+    const keywordCount = modeInfo.keywordCount
+
+    const historyWithThinking = [...historyWithUser, { type: 'bot', text: `Thinking... (Mode: ${modeInfo.label})`, timestamp: Date.now() }]
     updateMessages(historyWithThinking)
-    
+
     try {
-      const keywords = await expandQuery(currentQuery, apiKey)
-      const candidates = await searchMultipleKeywords(keywords, startTime)
-      
-      if (candidates.length === 0) {
-          const finalMsgs = [...historyWithUser, { type: 'bot', text: `No matches found for: ${keywords.join(', ')}`, timestamp: Date.now() }]
-          updateMessages(finalMsgs)
-          return
+      const keywords = await expandQuery(currentQuery, apiKey, keywordCount)
+      const candidatesTiered = await buildCandidatesTieredTwoPass(keywords, startTime, 100)
+      const finalCandidates = cleanAndDedupeCandidates(candidatesTiered).slice(0, 100)
+
+      if (finalCandidates.length === 0) {
+        const finalMsgs = [...historyWithUser, { type: 'bot', text: `No matches found for: ${keywords.join(', ')}`, timestamp: Date.now() }]
+        updateMessages(finalMsgs)
+        return
       }
 
-      const historyAnalyzing = [...historyWithUser, { type: 'bot', text: `Analyzing ${candidates.length} candidates...`, timestamp: Date.now() }]
+      const historyAnalyzing = [...historyWithUser, { type: 'bot', text: `Analyzing ${finalCandidates.length} candidates...`, timestamp: Date.now() }]
       updateMessages(historyAnalyzing)
 
-      const aiResult = await analyzeWithGemini(currentQuery, candidates, apiKey)
+      const aiResult = await analyzeWithGemini(currentQuery, finalCandidates, apiKey)
 
-      if (aiResult.found) {
-          const fullItem = candidates.find(h => h.url === aiResult.url) || { title: 'Result', url: aiResult.url, lastVisitTime: 'Unknown' }
-          const successMsg = [...historyWithUser, { type: 'bot', text: `Found it: ${aiResult.reason}`, data: [fullItem], timestamp: Date.now() }]
-          updateMessages(successMsg)
+      const results = Array.isArray(aiResult?.results) ? aiResult.results : []
+      const topItems = results
+        .map(r => finalCandidates.find(h => h.url === r.url) || { title: 'Result', url: r.url, lastVisitTime: 'Unknown' })
+        .slice(0, 5)
+
+      if (topItems.length > 0) {
+        const reasonText = results[0]?.reason ? `Top match: ${results[0].reason}` : 'Top related results found.'
+        const successMsg = [
+          ...historyWithUser,
+          {
+            type: 'bot',
+            text: reasonText,
+            data: topItems,
+            allData: finalCandidates,
+            timestamp: Date.now()
+          }
+        ]
+        updateMessages(successMsg)
       } else {
-          const failMsg = [...historyWithUser, { type: 'bot', text: 'Here is what I found.', data: candidates.slice(0, 5), timestamp: Date.now() }]
-          updateMessages(failMsg)
+        const failMsg = [
+          ...historyWithUser,
+          {
+            type: 'bot',
+            text: 'Here is what I found.',
+            data: finalCandidates.slice(0, 5),
+            allData: finalCandidates,
+            timestamp: Date.now()
+          }
+        ]
+        updateMessages(failMsg)
       }
     } catch (err) {
       const errorMsg = [...historyWithUser, { type: 'bot', text: 'Error in AI processing.', timestamp: Date.now() }]
@@ -179,9 +357,24 @@ function App() {
           </div>
 
           <div>
+            <label className="block text-xs font-bold text-gray-700 mb-1">Search Type</label>
+            <select
+              value={searchMode}
+              onChange={(e) => setSearchMode(e.target.value)}
+              className="w-full border border-gray-300 rounded p-2 text-sm focus:outline-none focus:border-blue-500"
+            >
+              <option value="superficial">Superficial (5 keywords)</option>
+              <option value="regular">Regular (20 keywords)</option>
+              <option value="exhaustive">Exhaustive (50 keywords)</option>
+              <option value="sheerlock">Sheerlock (100 keywords)</option>
+            </select>
+            <p className="text-[10px] text-gray-500 mt-1">Higher levels broaden the search by expanding more keywords.</p>
+          </div>
+
+          <div>
             <label className="block text-xs font-bold text-gray-700 mb-1">Google Gemini API Key (Optional)</label>
-            <input 
-              type="password" 
+            <input
+              type="password"
               value={apiKey}
               onChange={(e) => setApiKey(e.target.value)}
               placeholder="AIzaSy..."
@@ -192,8 +385,8 @@ function App() {
 
           <div>
             <label className="block text-xs font-bold text-gray-700 mb-1">Chat Retention</label>
-            <select 
-              value={retention} 
+            <select
+              value={retention}
               onChange={(e) => setRetention(parseInt(e.target.value))}
               className="w-full border border-gray-300 rounded p-2 text-sm focus:outline-none focus:border-blue-500"
             >
@@ -205,7 +398,7 @@ function App() {
           </div>
 
           <button onClick={saveSettings} className="w-full bg-blue-600 text-white py-2 rounded-lg text-sm font-bold hover:bg-blue-700 transition-colors">Save Configuration</button>
-          
+
           {apiKey && (
             <div className="pt-4 border-t mt-4">
               <button onClick={deleteSettings} className="w-full text-red-500 text-xs hover:text-red-700 font-medium border border-red-200 py-2 rounded">
@@ -242,6 +435,7 @@ function App() {
           <div key={idx} className={`flex flex-col max-w-[90%] ${msg.type === 'user' ? 'self-end items-end ml-auto' : 'items-start'}`}>
             <div className={`px-3 py-2 rounded-2xl text-sm shadow-sm ${msg.type === 'user' ? 'bg-blue-600 text-white rounded-br-none' : 'bg-white border border-gray-200 text-gray-800 rounded-bl-none'}`}>
               <p>{msg.text}</p>
+
               {msg.data && (
                 <ul className="mt-2 space-y-2">
                   {msg.data.map((item, i) => (
@@ -252,28 +446,58 @@ function App() {
                   ))}
                 </ul>
               )}
+
+              {msg.allData && msg.type === 'bot' && (
+                <div className="mt-3 flex gap-2 flex-wrap">
+                  <button
+                    onClick={() => toggleExpanded(idx)}
+                    className="text-xs border border-gray-200 px-2 py-1 rounded hover:border-gray-300 text-gray-600"
+                    title="Show all candidates sent to Gemini"
+                  >
+                    {expandedMessages[idx] ? `Hide all (${msg.allData.length})` : `Show all (${msg.allData.length})`}
+                  </button>
+                  <button
+                    onClick={() => exportCandidates(msg.allData)}
+                    className="text-xs border border-gray-200 px-2 py-1 rounded hover:border-gray-300 text-gray-600"
+                    title="Export candidates"
+                  >
+                    Export
+                  </button>
+                </div>
+              )}
+
+              {msg.allData && expandedMessages[idx] && (
+                <ul className="mt-2 space-y-2">
+                  {msg.allData.map((item, i) => (
+                    <li key={i} className="border-t pt-2 first:border-0 first:pt-0">
+                      <a href={item.url} target="_blank" rel="noopener noreferrer" className="font-medium text-blue-600 hover:underline block truncate">{item.title}</a>
+                      <span className="text-xs text-gray-400 block truncate">{item.url}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
-             <span className="text-[10px] text-gray-400 mt-1 px-1">{msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</span>
+            <span className="text-[10px] text-gray-400 mt-1 px-1">{msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : ''}</span>
           </div>
         ))}
         <div ref={messagesEndRef} />
       </div>
 
       <div className="p-3 border-t bg-white space-y-2">
-         <div className="flex gap-2 justify-end">
-            <select value={timeRange} onChange={(e) => setTimeRange(e.target.value)} className="text-xs border border-gray-300 rounded px-2 py-1 bg-gray-50 text-gray-600 focus:outline-none focus:border-blue-500">
-              <option value="24h">Last 24h</option>
-              <option value="7d">Last 7 Days</option>
-              <option value="30d">Last 30 Days</option>
-              <option value="3m">Last 3 Months</option>
-            </select>
-         </div>
+        <div className="flex gap-2 justify-end">
+          <select value={timeRange} onChange={(e) => setTimeRange(e.target.value)} className="text-xs border border-gray-300 rounded px-2 py-1 bg-gray-50 text-gray-600 focus:outline-none focus:border-blue-500">
+            <option value="24h">Last 24h</option>
+            <option value="7d">Last 7 Days</option>
+            <option value="30d">Last 30 Days</option>
+            <option value="3m">Last 3 Months</option>
+          </select>
+        </div>
         <div className="relative">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={apiKey ? "Ask about your history..." : "Search local keywords..."}
+            placeholder={apiKey ? 'Ask about your history...' : 'Search local keywords...'}
             className="w-full border border-gray-300 rounded-full pl-4 pr-12 py-2 text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 transition-all shadow-sm"
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
           />
