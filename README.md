@@ -4,7 +4,7 @@ A privacy-first Chrome extension that helps you rediscover websites you’ve vis
 
 Instead of digging through history, just ask.
 
-DEMO: https://www.youtube.com/watch?v=qqbKGZbqk0g
+DEMO: https://youtu.be/V6LXm6JLMJQ
 
 ---
 
@@ -146,3 +146,4 @@ When enabled:
 - Deterministic results.
 - AI as a ranking tool, not a source of truth.
 - Maximum recall with minimum tokens.
+
