@@ -1,67 +1,148 @@
-# Chat with History - Chrome Extension
+# History Chat – Chrome Extension
 
-A privacy-focused Chrome extension that lets you chat with your browsing history using natural language. Recall websites you visited without remembering the exact URL or title.
+A privacy-first Chrome extension that helps you rediscover websites you’ve visited using natural language, even when you don’t remember exact keywords, titles, or URLs.
+
+Instead of digging through history, just ask.
 
 DEMO: https://www.youtube.com/watch?v=qqbKGZbqk0g
 
-## Features
+---
 
-**Natural Language Search**
-Ask "Where was that recipe for pizza?" instead of exact keywords.
+## Key Features
 
-**Local-First Privacy**
-Works out-of-the-box with local keyword search. AI features are strictly opt-in.
+### Natural Language History Search
+Ask things like:
+- “The page about planting trees and animals”
+- “That documentation I used for Python loops”
 
-**Configurable Retention**
-You control how far back to search (24h, 7 days, 30 days) and how long chat logs are kept.
+The extension finds real pages from your browsing history. Nothing is invented.
 
-**No Hallucinations**
-Results are fetched directly from your local \`chrome.history\`. If it's not in your history, the extension won't invent it.
+---
+
+### Progressive Smart Search (AI-Optional)
+When AI mode is enabled, searches run in progressive levels to maximize recall while minimizing API usage:
+
+- Superficial – 5 high-value keywords  
+- Regular (default) – 20 keywords  
+- Exhaustive – 50 keywords  
+- Sheerlock – up to 100 keywords (deep recovery mode)
+
+Keywords are ordered by relevance and searched locally until enough real pages are found.
+
+---
+
+### Local-First by Design
+- Works fully offline with basic keyword search.
+- AI features are strictly opt-in.
+- Your browsing history is never uploaded in bulk.
+
+---
+
+### Token-Efficient AI Usage
+- AI never scans your full history.
+- No hallucinations: if it’s not in your history, it won’t appear.
+- Designed to stay within very small token budgets.
+
+---
+
+### Transparent Results
+- Shows the Top 5 most relevant pages.
+- Option to view or export all candidates.
+- You always see what the AI evaluated.
+
+---
+
+### Configurable Retention
+- Control how far back searches go (24h, 7 days, 30 days, 3 months).
+- Control how long chat history is stored locally.
+- Old data is automatically purged.
+
+---
 
 ## Installation
 
-1. Download or clone this repository.
-2. **Ensure you are in the \`history-chat\` directory.**
-3. Run \`npm install\` to install dependencies.
-4. Run \`npm run build\` to generate the \`/dist\` folder.
-5. Open Chrome and go to \`chrome://extensions\`.
-6. Enable **Developer mode** (top right).
-7. Click **Load unpacked** and select the \`dist\` folder created in step 3.
+1. Clone or download this repository.
+2. Navigate to the history-chat directory
+3. Install dependencies:
+   npm install
+4. Build the extension:
+   npm run build
+5. Open Chrome and go to chrome://extensions.
+6. Enable Developer mode (top right).
+7. Click Load unpacked and select the generated dist folder.
+
+---
 
 ## Usage
 
-1. Click the extension icon to open the chat.
-2. **Basic Mode (Default):** Type keywords (e.g., "docs python") to search instantly.
-3. **AI Mode (Optional):** Go to Settings (gear icon) and enter a Google Gemini API Key. This enables natural language queries (e.g., "The documentation page I used for Python loops").
+1. Click the extension icon to open History Chat.
+2. Basic Mode (default):
+   - Type keywords like python, docs, bank, flight, booking.
+3. AI Mode (optional):
+   - Open Settings (gear icon).
+   - Enter a Google Gemini API Key.
+   - Choose a search depth (Superficial → Sheerlock).
 4. Click any result to open it in a new tab.
+5. Use Show all or Export to inspect every evaluated link.
+
+---
 
 ## Permissions Justification
 
-This extension adheres to the principle of least privilege.
+This extension follows the principle of least privilege.
 
-**\`history\`**
-Essential to search the user's visited sites based on their query. Data is processed locally or passed to the AI (only if opt-in) solely for finding the relevant link.
+### history
+Required to search your visited pages.  
+Data is processed locally and only specific candidate URLs are sent to AI if you explicitly enable it.
 
-**\`storage\`**
-Used to save user preferences (API Key, retention settings) and the temporary chat log locally on the device.
+### storage
+Used to store:
+- User preferences (API key, search mode, retention)
+- Temporary chat history (stored locally only)
+
+No background tracking. No analytics.
+
+---
 
 ## Data Privacy
 
-**Local Data**
-Your browsing history never leaves your device by default.
+### Local by Default
+Your browsing history never leaves your device unless you enable AI features.
 
-**AI Processing**
-If you opt-in to use Gemini, only the specific search query and the titles/URLs of potential matches are sent to the API for analysis. They are not stored by the extension developer.
+### AI Processing (Opt-In)
+When enabled:
+- Only the search query and a limited set of candidate titles/URLs are sent to Google Gemini.
+- No full history, no cookies, no identifiers.
+- Data is not stored by the extension developer.
 
-**Transparency**
-You can clear your API key and chat history at any time via the Settings menu.
+### Full User Control
+- Remove your API key at any time.
+- Clear chat history instantly from Settings.
 
-## Architecture
+---
 
-**Frontend:** React + Vite + TailwindCSS.
+## Architecture Overview
 
-**Logic:**
-1. **Intent Extraction:** Converts natural language into search keywords.
-2. **Local Retrieval:** Queries \`chrome.history\` API.
-3. **Semantic Ranking:** Uses LLM to select the most relevant link from the candidates.
+### Frontend
+- React
+- Vite
+- TailwindCSS
 
+### Search Pipeline
+1. Intent Expansion (optional)  
+   Converts natural language into ordered, unique keywords.
+2. Local Retrieval  
+   Progressive keyword search over chrome.history.
+3. Candidate Cleaning  
+   Deduplication, URL normalization, removal of search noise.
+4. Semantic Ranking (optional)  
+   AI selects the most relevant links from real history entries.
+
+---
+
+## Philosophy
+
+- Privacy first.
+- Deterministic results.
+- AI as a ranking tool, not a source of truth.
+- Maximum recall with minimum tokens.
