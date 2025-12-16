@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Chat with History",
+  "version": "1.0.0",
+  "description": "Recalls websites from your history using natural language.",
+  "permissions": [
+    "history",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://api.openai.com/*",
+    "https://generativelanguage.googleapis.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Open History Chat",
+    "default_popup": "index.html"  
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  }
+}
